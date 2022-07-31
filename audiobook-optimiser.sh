@@ -3,10 +3,12 @@
 INCLUDE_DURATION_IN_DESCRIPTION=false
 
 METADATA_FILE="./metadata.txt"
+CHAPTERS_FILE="./.chapters.txt"
 INPUT_FILE="${*}"
+INPUT_DIRECTORY="."
 INPUT_FILE_NAME=$(basename "${INPUT_FILE}")
-
-FILE_FORMAT="${INPUT_FILE_NAME##*.}"
+INPUT_FILE_LABEL="${INPUT_FILE_NAME%%.*}"
+INPUT_FILE_FORMAT="${INPUT_FILE_NAME##*.}"
 
 function getDuration() {
     for FILE in ./*.mp3; do
@@ -155,17 +157,37 @@ echo "First chapter: ${FIRST_CHAPTER_NUMBER}"
 [ -n "${NARRATOR_NAME}" ]    && echo "${NARRATOR_NAME}"  > "reader.txt"
 [ -n "${DESCRIPTION}" ]      && echo "${DESCRIPTION}"    > "desc.txt"
 
-if [ "${FILE_FORMAT}" == "m4b" ]; then
-    TIMESTAMP_START=""
-    TIMESTAMP_END=""
+function generate_chapters_list_from_cue() {
+    local CUE_FILE="${1}"
 
-    TEMP_FILE=".tmp.txt"
-    CHAPTERS_FILE=".chapters.txt"
+    grep "^\s*\(TRACK\|TITLE\|INDEX\)" "${CUE_FILE}" | tr '\n' ' ' | sed 's/\s\s*/ /g' > "${CHAPTERS_FILE}"
+    sed -i \
+        -e's/TRACK [0-9]* AUDIO TITLE \"\([^\"]*\)\" INDEX [0-9]* \([0-9:]*\)/\2 END%NL%/g' \
+        -e 's/END%NL%\s*\([0-9][0-9:]*\)/\1%NL%\1/g' \
+        -e 's/%NL%/\n/g' \
+        -e 's/^\s*//g' \
+        "${CHAPTERS_FILE}"
+}
 
-    ffmpeg -i "${INPUT_FILE}" 2> "${TEMP_FILE}"
+function generate_chapters_list_from_m4b() {
+    local M4B_FILE="${1}"
+    local TEMP_FILE=".tmp.txt"
+
+    ffmpeg -i "${M4B_FILE}" 2> "${TEMP_FILE}"
     grep "Chapter " "${TEMP_FILE}" | grep "start" | grep "end" | \
         sed 's/^\s*Chapter \#[0-9][0-9]*:\([0-9]*\): start \([0-9\.]*\), end \([0-9\.]*\).*$/\2 \3/g' \
         > "${CHAPTERS_FILE}"
+
+    rm "${TEMP_FILE}"
+}
+
+function extract_chapters_from_file() {
+    local FILE_TO_EXTRACT="${1}"
+    
+    local TIMESTAMP=""
+    local TIMESTAMP_START=""
+    local TIMESTAMP_END=""
+    local TIMESTAMPS_COUNT=0
 
     TIMESTAMPS_COUNT=$(wc -l "${CHAPTERS_FILE}" | awk '{print $1}')
 
@@ -179,23 +201,37 @@ if [ "${FILE_FORMAT}" == "m4b" ]; then
         TIMESTAMP_START=$(echo "${TIMESTAMP}" | awk -F" " '{print $1}')
         TIMESTAMP_END=$(echo "${TIMESTAMP}" | awk -F" " '{print $2}')
 
-        CHAPTER_NR=$INDEX #$((INDEX-1))
-        CHAPTER_NR_PREFIX=""
+        local CHAPTER_NR=${INDEX} #$((INDEX-1))
+        local CHAPTER_PREFIX=""
 
         [ ${CHAPTER_NR} -lt 1 ]  && continue
         [ ${CHAPTER_NR} -lt 10 ] && [ ${TIMESTAMPS_COUNT} -ge 10 ] && CHAPTER_NR_PREFIX="0"
 
-        CHAPTER_FILE="Chapter ${CHAPTER_NR_PREFIX}${CHAPTER_NR}.mp3"
-        CHAPTER_TEMP_FILE=".temp.${CHAPTER_FILE}"
+        local CHAPTER_FILE="Chapter ${CHAPTER_NR_PREFIX}${CHAPTER_NR}.mp3"
+        local CHAPTER_TEMP_FILE=".temp.${CHAPTER_FILE}"
 
         echo "Extracting chapter ${CHAPTER_NR} (${TIMESTAMP_START} -> ${TIMESTAMP_END}) into '${CHAPTER_FILE}'..."
-        ffmpeg -y -i "${INPUT_FILE}" -ss "${TIMESTAMP_START}" -to "${TIMESTAMP_END}" -map 0:a:0 -c:a:0 mp3 "${CHAPTER_FILE}" 2>/dev/null
+        if [ "${TIMESTAMP_END}" == "END" ]; then
+            ffmpeg -y -i "${FILE_TO_EXTRACT}" -ss "${TIMESTAMP_START}" -map 0:a:0 -c:a:0 mp3 "${CHAPTER_FILE}" 2>/dev/null
+        else
+            ffmpeg -y -i "${FILE_TO_EXTRACT}" -ss "${TIMESTAMP_START}" -to "${TIMESTAMP_END}" -map 0:a:0 -c:a:0 mp3 "${CHAPTER_FILE}" 2>/dev/null
+        fi
         ffmpeg -y -i "${CHAPTER_FILE}" -c copy "${CHAPTER_TEMP_FILE}" 2>/dev/null
         mv "${CHAPTER_TEMP_FILE}" "${CHAPTER_FILE}"
     done
 
-    rm "${TEMP_FILE}"
 #    rm "${CHAPTERS_FILE}"
+}
+
+if [ "${INPUT_FILE_FORMAT}" == "mp3" ]; then
+    CUE_FILE="${INPUT_DIRECTORY}/${INPUT_FILE_LABEL}.cue"
+    if [ -f "${CUE_FILE}" ]; then
+        generate_chapters_list_from_cue "${CUE_FILE}"
+        extract_chapters_from_file "${INPUT_FILE}"
+    fi    
+elif [ "${INPUT_FILE_FORMAT}" == "m4b" ]; then
+    generate_chapters_list_from_m4b "${INPUT_FILE}"
+    extract_chapters_from_file "${INPUT_FILE}"
 fi
 
 TRACK_INDEX=1
